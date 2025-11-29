@@ -44,41 +44,67 @@ static bool OpenDataCollectionFile(String<MaxFilenameLength> filename, unsigned 
 
 	// Write the header line
 	{
-		static constexpr const char *headings[16] =
-		{
-			",Raw Encoder Reading",
-			",Measured Motor Steps",
-			",Target Motor Steps",
-			",Current Error",
-			",PID Control Signal",
-			",PID P Term",
-			",PID I Term",
-			",PID D Term",
+		//static constexpr const char *headings[17] =
+		//{
+		//	",Raw Encoder Reading",
+		//	",Measured Motor Steps",
+		//	",Target Motor Steps",
+		//	",Current Error",
+		//	",PID Control Signal",
+		//	",PID P Term",
+		//	",PID I Term",
+		//	",PID D Term",
 
 			// The next two are out of order in the filter bits, they come later on
-			",PID V Term",
-			",PID A Term",
+		//	",PID V Term",
+		//	",PID A Term",
+		//	",PID J Term",
 
-			",Measured Step Phase",
-			",Desired Step Phase",
-			",Phase Shift",
-			",Coil A Current",
-			",Coil B Current",
-			",Unknown",
-		};
+		//	",Measured Step Phase",
+		//	",Desired Step Phase",
+		//	",Phase Shift",
+		//	",Coil A Current",
+		//	",Coil B Current",
+		//	",Measured Velocity",
+			// ",Unknown",
+		//};
 		String<StringLength500> temp;
 		temp.copy("Sample,Timestamp");
-		uint16_t filter = (filterRequested & (CL_RECORD_CURRENT_STEP_PHASE - 1))
-						| ((filterRequested & (CL_RECORD_CURRENT_STEP_PHASE | CL_RECORD_DESIRED_STEP_PHASE | CL_RECORD_PHASE_SHIFT | CL_RECORD_COIL_A_CURRENT | CL_RECORD_COIL_B_CURRENT)) << 2)
-						| ((filterRequested & (CL_RECORD_PID_V_TERM | CL_RECORD_PID_A_TERM)) >> 5);
-		for (unsigned int i = 0; filter != 0; ++i)
-		{
-			if (filter & 1u)
-			{
-				temp.cat(headings[i]);
-			}
-			filter >>= 1;
-		}
+		//uint32_t filter = (filterRequested & (CL_RECORD_CURRENT_STEP_PHASE - 1))
+		//				//| //((filterRequested & CL_RECORD_MEASURED_VELOCITY) >> 12)
+		//				//| //((filterRequested & (CL_RECORD_PID_V_TERM | CL_RECORD_PID_A_TERM)) >> 5)
+		//				//| //((filterRequested & CL_RECORD_PID_J_TERM) >> 5)
+		//				//| //((filterRequested & (CL_RECORD_CURRENT_STEP_PHASE | CL_RECORD_DESIRED_STEP_PHASE | CL_RECORD_PHASE_SHIFT | CL_RECORD_COIL_A_CURRENT | CL_RECORD_COIL_B_CURRENT)) << 4);
+		//				| ((filterRequested & (CL_RECORD_PID_V_TERM | CL_RECORD_PID_A_TERM)) >> 5)
+		//				| ((filterRequested & CL_RECORD_PID_J_TERM) >> 5)
+		//				| ((filterRequested & (CL_RECORD_CURRENT_STEP_PHASE | CL_RECORD_DESIRED_STEP_PHASE | CL_RECORD_PHASE_SHIFT | CL_RECORD_COIL_A_CURRENT | CL_RECORD_COIL_B_CURRENT | CL_RECORD_MEASURED_VELOCITY)) << 3);
+		//for (unsigned int i = 0; filter != 0; ++i)
+		//{
+		//	if (filter & 1u)
+		//	{
+		//		temp.cat(headings[i]);
+		//	}
+		//	filter >>= 1;
+		//}
+		// The order of these checks MUST match the order they are read in ProcessReceivedData()
+		if (filterRequested & CL_RECORD_RAW_ENCODER_READING)	{ temp.cat(",Raw Encoder Reading"); }
+		if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS)  	{ temp.cat(",Measured Motor Steps"); }
+		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)  	{ temp.cat(",Target Motor Steps"); }
+		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ temp.cat(",Current Error"); }
+		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ temp.cat(",PID Control Signal"); }
+		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ temp.cat(",PID P Term"); }
+		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ temp.cat(",PID I Term"); }
+		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ temp.cat(",PID D Term"); }
+		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ temp.cat(",Measured Step Phase"); }
+		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ temp.cat(",Desired Step Phase"); }
+		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ temp.cat(",Phase Shift"); }
+		if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ temp.cat(",Coil A Current"); }
+		if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ temp.cat(",Coil B Current"); }
+		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ temp.cat(",PID V Term"); }
+		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ temp.cat(",PID A Term"); }
+		if (filterRequested & CL_RECORD_PID_J_TERM) 			{ temp.cat(",PID J Term"); }
+		if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ temp.cat(",Measured Velocity"); }
+
 		temp.cat("\n");
 		f->Write(temp.c_str());							// this call could result in the file becoming invalidated
 	}
@@ -242,13 +268,15 @@ void ClosedLoop::ProcessReceivedData(CanAddress src, const CanMessageClosedLoopD
 				if (filterRequested & CL_RECORD_PID_P_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
 				if (filterRequested & CL_RECORD_PID_I_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
 				if (filterRequested & CL_RECORD_PID_D_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_V_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_A_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
 				if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ currentLine.catf(",%u",	FetchLEU16(dataPtr)); }
 				if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ currentLine.catf(",%u",	FetchLEU16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ currentLine.catf(",%u",	FetchLEU16(dataPtr)); }
+				if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ currentLine.catf(",%.4f", (double)FetchLEF16(dataPtr)); }
 				if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ currentLine.catf(",%d",	FetchLEI16(dataPtr)); }
 				if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ currentLine.catf(",%d",	FetchLEI16(dataPtr)); }
+				if (filterRequested & CL_RECORD_PID_V_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
+				if (filterRequested & CL_RECORD_PID_A_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
+				if (filterRequested & CL_RECORD_PID_J_TERM) 			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
+				if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ currentLine.catf(",%.4f", (double)FetchLEF16(dataPtr)); } 
 				currentLine.cat("\n");
 
 				// Write the data
