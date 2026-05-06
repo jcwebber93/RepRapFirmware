@@ -35,7 +35,10 @@ enum class GCodeBufferState : uint8_t
 	parsingChecksum,								// parsing the checksum after '*'
 	discarding,										// discarding characters after the checksum or an end-of-line comment
 	ready,											// we have a complete gcode but haven't started executing it
-	executing										// we have a complete gcode and have started executing it
+	executing,										// we have a complete gcode and have started executing it
+#if HAS_SBC_INTERFACE
+	executingOnSbc									// we are executing this code on the SBC
+#endif
 };
 
 // Type of a status report
@@ -81,8 +84,8 @@ public:
 	int32_t GetLineNumber() const noexcept { return CurrentFileMachineState().lineNumber; }
 	bool HadExplicitLineNumber() const noexcept { return hadExplicitLineNumber; }
 	uint32_t GetExplicitLineNumber() const noexcept { return receivedLineNumber; }
-	void SetExplicitLineNumber(uint32_t ln) noexcept { receivedLineNumber = ln; hadExplicitLineNumber = true; }
-	void ClearExplicitLineNumber() noexcept { hadExplicitLineNumber = false; }
+	void SetExplicitLineNumber(uint32_t ln) noexcept;
+	void ClearExplicitLineNumber() noexcept;
 	bool IsLastCommand() const noexcept;
 	GCodeResult GetLastResult() const noexcept { return lastResult; }
 	void SetLastResult(GCodeResult r) noexcept { lastResult = r; }
@@ -233,11 +236,13 @@ public:
 	bool IsMessageAcknowledged() const noexcept { return messageAcknowledged; }		// Indicates if a message has been acknowledged
 	void MessageAcknowledgementSent() noexcept { messageAcknowledged = false; }		// Called when the SBC has been notified about the message acknowledgement
 
-	bool IsInvalidated() const noexcept { return invalidated; }		// Indicates if the channel is invalidated
-	void Invalidate(bool i = true) noexcept { invalidated = i; }	// Invalidate this channel (or not)
+	bool IsInvalidated() const noexcept { return invalidated; }				// Indicates if the channel is invalidated
+	void Invalidate(bool i = true) noexcept { invalidated = i; }			// Invalidate this channel (or not)
 
-	bool IsSendRequested() const noexcept { return sendToSbc; }	// Is this code supposed to be sent to the SBC
-	void SendToSbc() noexcept { sendToSbc = true; }				// Send this code to the attached SBC
+	bool IsSendRequested() const noexcept { return sendToSbc; }				// Is this code supposed to be sent to the SBC
+	void SendToSbc() noexcept { sendToSbc = true; }							// Send this code to the attached SBC
+	void SentToSbc() noexcept;												// Code has been sent to the SBC, wait for it to finish
+	bool IsExecutingOnSbc() const noexcept { return bufferState == GCodeBufferState::executingOnSbc; }
 #endif
 
 	GCodeState GetState() const noexcept;
@@ -258,6 +263,7 @@ public:
 	const char *_ecv_array GetIdentity() const noexcept { return codeChannel.ToString(); }
 	bool CanQueueCodes() const noexcept;
 	MessageType GetResponseMessageType() const noexcept;
+	MessageType GetNativeResponseMessageType() const noexcept { return responseMessageType; }
 
 #if HAS_MASS_STORAGE
 	bool OpenFileToWrite(const char *_ecv_array directory, const char *_ecv_array fileName, const FilePosition size, const bool binaryWrite, const uint32_t fileCRC32) noexcept;
@@ -411,6 +417,13 @@ inline bool GCodeBuffer::IsFileFinished() const noexcept
 inline bool GCodeBuffer::IsMacroStartedByCode() const noexcept
 {
 	return machineState->macroStartedByCode;
+}
+
+inline void GCodeBuffer::SentToSbc() noexcept
+{
+	sendToSbc = false;
+	stringParser.Init();	// must be called before bufferState is set because Init() overwrites it
+	bufferState = GCodeBufferState::executingOnSbc;
 }
 
 #endif

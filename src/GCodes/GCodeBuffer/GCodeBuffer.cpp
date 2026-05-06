@@ -242,28 +242,41 @@ void GCodeBuffer::Diagnostics(const StringRef& reply) noexcept
 		reply.cat('"');
 		break;
 
+#if HAS_SBC_INTERFACE
+	case GCodeBufferState::executingOnSbc:
+		reply.cat("is doing \"");
+		AppendFullCommand(reply);
+		reply.cat("\" on the SBC");
+		break;
+#endif
+
 	default:
 		reply.cat("is assembling a command");
 		break;
 	}
 
-	reply.cat(" in state(s)");
-	const GCodeMachineState *_ecv_null ms = machineState;
-	do
-	{
-		reply.catf(" %d", (int)ms->GetState());
-		ms = ms->GetPrevious();
-	} while (ms != nullptr);
-	if (IsDoingFileMacro())
-	{
-		reply.cat(", running macro");
-	}
+	if (machineState->GetPrevious() != nullptr ||
+		machineState->GetState() != GCodeState::normal || IsDoingFileMacro()
 #if SUPPORT_ASYNC_MOVES
-	if (syncState != SyncState::running)
-	{
-		reply.catf(", sync state %u", (unsigned int)syncState);
-	}
+		|| syncState != SyncState::running
 #endif
+	)
+	{
+		reply.cat(" in state(s)");
+		const GCodeMachineState *_ecv_null ms = machineState;
+		do {
+			reply.catf(" %d", (int)ms->GetState());
+			ms = ms->GetPrevious();
+		} while (ms != nullptr);
+		if (IsDoingFileMacro()) {
+			reply.cat(", running macro");
+		}
+#if SUPPORT_ASYNC_MOVES
+		if (syncState != SyncState::running) {
+			reply.catf(", sync state %u", (unsigned int)syncState);
+		}
+#endif
+	}
 }
 
 // Add a character to the end
@@ -434,6 +447,24 @@ bool GCodeBuffer::IsLaterThan(const GCodeBuffer& other) const noexcept
 }
 
 #endif
+
+// Set the line number, if we are at the top level of the stack excluding any local pushes
+void GCodeBuffer::SetExplicitLineNumber(uint32_t ln) noexcept
+{
+	if (CurrentFileMachineState().GetPrevious() == nullptr)
+	{
+		receivedLineNumber = ln; hadExplicitLineNumber = true;
+	}
+}
+
+// Clear the line number, if we are at the top level of the stack excluding any local pushes
+void GCodeBuffer::ClearExplicitLineNumber() noexcept
+{
+	if (CurrentFileMachineState().GetPrevious() == nullptr)
+	{
+		hadExplicitLineNumber = false;
+	}
+}
 
 // Return true if the command we have just completed was the last command in the line of GCode.
 // If the command was or called a macro then there will be no command in the buffer, so we must return true for this case also.
@@ -1230,7 +1261,7 @@ void GCodeBuffer::MessageAcknowledged(bool cancelled, bool shouldAbort, uint32_t
 MessageType GCodeBuffer::GetResponseMessageType() const noexcept
 {
 #if HAS_SBC_INTERFACE
-	if (machineState->lastCodeFromSbc || (GetCommandLetter() == 'M' && GetCommandNumber() == 121))
+	if (machineState->lastCodeFromSbc)
 	{
 		return (MessageType)((1u << codeChannel.ToBaseType()) | BinaryCodeReplyFlag);
 	}
@@ -1290,7 +1321,12 @@ void GCodeBuffer::WaitForAcknowledgement(uint32_t seq) noexcept
 
 bool GCodeBuffer::OpenFileToWrite(const char *_ecv_array directory, const char *_ecv_array fileName, const FilePosition size, const bool binaryWrite, const uint32_t fileCRC32) noexcept
 {
-	return NOT_BINARY_AND(stringParser.OpenFileToWrite(directory, fileName, size, binaryWrite, fileCRC32));
+	if (NOT_BINARY_AND(stringParser.OpenFileToWrite(directory, fileName, size, binaryWrite, fileCRC32)))
+	{
+		normalInput->SetWritingFile(true);
+		return true;
+	}
+	return false;
 }
 
 bool GCodeBuffer::IsWritingFile() const noexcept
@@ -1301,6 +1337,10 @@ bool GCodeBuffer::IsWritingFile() const noexcept
 void GCodeBuffer::WriteToFile() noexcept
 {
 	IF_NOT_BINARY(stringParser.WriteToFile());
+	if (!IsWritingFile())
+	{
+		normalInput->SetWritingFile(false);
+	}
 }
 
 bool GCodeBuffer::IsWritingBinary() const noexcept
@@ -1316,6 +1356,7 @@ bool GCodeBuffer::WriteBinaryToFile(char b) noexcept
 void GCodeBuffer::FinishWritingBinary() noexcept
 {
 	IF_NOT_BINARY(stringParser.FinishWritingBinary());
+	normalInput->SetWritingFile(false);
 }
 
 #endif

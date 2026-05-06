@@ -236,8 +236,6 @@ public:
 		pre(restorePointNumber < NumTotalRestorePoints);							// Save position etc. to a restore point
 	void StartToolChange(GCodeBuffer& gb, MovementState& ms, uint8_t param) noexcept;
 
-	unsigned int GetPrimaryWorkplaceCoordinateSystemNumber() const noexcept { return GetPrimaryMovementState().currentCoordinateSystem + 1; }
-
 #if SUPPORT_COORDINATE_ROTATION
 	void RotateCoordinates(const MovementState& ms, float angleDegrees, float coords[2]) const noexcept;		// Account for coordinate rotation
 #endif
@@ -259,8 +257,6 @@ public:
 	{
 		return workplaceCoordinates[workplaceNumber][axis];
 	}
-	float GetPrimaryMaxPrintingAcceleration() const noexcept { return moveStates[0].maxPrintingAcceleration; }
-	float GetPrimaryMaxTravelAcceleration() const noexcept { return moveStates[0].maxTravelAcceleration; }
 
 # if SUPPORT_COORDINATE_ROTATION
 	float GetRotationAngle(const MovementState& ms) const noexcept { return ms.g68Angle; }
@@ -370,6 +366,7 @@ private:
 #if SUPPORT_ASYNC_MOVES
 	void UnlockMovementFrom(const GCodeBuffer& gb, MovementSystemNumber firstMsNumber) noexcept;	// Release movement locks greater or equal to than the specified one
 #endif
+	bool WaitForEndstopOrProbingMoveToFinish(GCodeBuffer& gb) noexcept;			// Wait for movement to stop after performing a move that may terminate early
 
 	void SetInitialAxisAndDrivePositions() noexcept;							// Called at initialisation and when new axes are added
 	void AdjustEndpoint(size_t drive, float ratio) const noexcept;				// Adjust an endpoint following a change to steps/mm
@@ -408,7 +405,7 @@ private:
 	bool DoArcMove(GCodeBuffer& gb, bool clockwise) THROWS(GCodeException);							// Execute an arc move
 	void FinaliseMove(GCodeBuffer& gb, MovementState& ms) noexcept;									// Adjust the move parameters to account for segmentation and/or part of the move having been done already
 	bool CheckEnoughAxesHomed(AxesBitmap axesToMove) noexcept;										// Check that enough axes have been homed
-	void TravelToStartPoint(GCodeBuffer& gb) noexcept;												// Set up a move to travel to the resume point
+	void TravelToStartPoint(GCodeBuffer& gb, MovementState& ms) noexcept;							// Set up a move to travel to the resume point
 
 	GCodeResult DoDwell(GCodeBuffer& gb) THROWS(GCodeException);														// Wait for a bit
 	GCodeResult DoHome(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);									// Home some axes
@@ -618,6 +615,9 @@ private:
 #if HAS_NETWORKING || HAS_SBC_INTERFACE
 	NetworkGCodeInput* httpInput;										// These cache incoming G-codes...
 	NetworkGCodeInput* telnetInput;										// ...
+#endif
+#if defined(SERIAL_MAIN_DEVICE) && (!SAME5x || CORE_USES_TINYUSB)
+	BufferedStreamGCodeInput* usbInput;									// USB input with out-of-band urgent command scanning
 #endif
 
 	GCodeBuffer *_ecv_null gcodeSources[NumGCodeChannels];						// The various sources of gcodes

@@ -697,7 +697,9 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 			||  code == 32 || (code >= 36 && code <= 39)
 			|| (code == 98 && gb.Seen('R'))
 			||  code == 112
-			||  code == 121
+# if SUPPORT_ASYNC_MOVES
+			||  code == 121		// DSF only needs this to keep inputs[].active up-to-date for proper MMS sync
+# endif
 			|| (code >= 470 && code <= 472)
 			||  code == 503 || code == 505
 			||  code == 540 || (code >= 550 && code <= 552) || (code >= 586 && code <= 589)
@@ -1688,7 +1690,11 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 				{
 					String<MaxFilenameLength> filename;
 					gb.GetQuotedString(filename.GetRef());
-					DoFileMacroWithParameters(gb, filename.c_str(), true, code);
+					if (!DoFileMacroWithParameters(gb, filename.c_str(), false, code))
+					{
+						reply.printf("Macro file %s not found", filename.c_str());
+						result = GCodeResult::error;
+					}
 				}
 				else if (gb.Seen('R'))
 				{
@@ -2184,6 +2190,15 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 
 			case 121:
 				Pop(gb, true);
+#if HAS_SBC_INTERFACE && SUPPORT_ASYNC_MOVES
+				if (gb.IsBinary() && !gb.LatestMachineState().lastCodeFromSbc)
+				{
+					// When we get here M121 was retransmitted from DSF but the old stack level says the
+					// last code came from a text-based input. We must reset that here so that the SBC
+					// gets a response back first. The next code will reset lastCodeFromSbc anyway
+					gb.LatestMachineState().lastCodeFromSbc = true;
+				}
+#endif
 				break;
 
 			case 122:
@@ -3086,7 +3101,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 					{
 						// In SBC mode. some keys are provided by DSF unless R1 is present
 						const char *keyStart = (key[0] == '#') ? key.c_str() + 1 : key.c_str();
-						if (StringStartsWith(keyStart, "network") || StringStartsWith(keyStart, "volumes"))
+						if (StringStartsWith(keyStart, "network") || StringStartsWith(keyStart, "plugins") || StringStartsWith(keyStart, "sbc") || StringStartsWith(keyStart, "volumes"))
 						{
 							gb.SendToSbc();
 							return false;

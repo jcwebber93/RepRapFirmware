@@ -26,6 +26,16 @@
 # include <Comms/PanelDueUpdater.h>
 #endif
 
+// Wait for movement to stop after performing a move that may terminate early
+bool GCodes::WaitForEndstopOrProbingMoveToFinish(GCodeBuffer& gb) noexcept
+{
+	return LockCurrentMovementSystemAndWaitForStandstill(gb)
+#if SUPPORT_CAN_EXPANSION
+			&& CanMotion::RevertStoppedDrivers()
+#endif
+		;
+}
+
 // Execute a step of the state machine
 // CAUTION: don't allocate any long strings or other large objects directly within this function.
 // The reason is that this function calls FinishedBedProbing(), which on a delta calls DoAutoCalibration(), which uses lots of stack.
@@ -50,11 +60,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 	switch (state)
 	{
 	case GCodeState::waitingForSpecialMoveToComplete:
-		if (   LockCurrentMovementSystemAndWaitForStandstill(gb)		// movement should already be locked, but we need to wait for standstill and fetch the current position
-#if SUPPORT_CAN_EXPANSION
-			&& CanMotion::RevertStoppedDrivers()
-#endif
-		   )
+		if (WaitForEndstopOrProbingMoveToFinish(gb))			// movement should already be locked, but we need to wait for standstill and fetch the current position
 		{
 			// Check whether we need to action any endstops
 			if (ms.axesToHome.IsNonEmpty())						// check whether we made any G1 H1 moves and need to set axis positions
@@ -217,7 +223,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::probingToolOffset4:					// executing M585, probing move has started
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			if (m585Settings.useProbe)
 			{
@@ -286,7 +292,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::findCenterOfCavity3:						// Executing M675, min probing move has started
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			const auto zp = platform.GetZProbeOrDefault(currentZProbeNumber);
 			zp->SetProbing(false);
@@ -324,7 +330,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::findCenterOfCavity5:						// Executing M675, max probing move has started
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			reprap.GetHeat().SuspendHeaters(false);
 			const auto zp = platform.GetZProbeOrDefault(currentZProbeNumber);
@@ -521,7 +527,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 	case GCodeState::m109ToolChangeComplete:
 		if (LockCurrentMovementSystemAndWaitForStandstill(gb))	// wait for the move to height to finish
 		{
-			gb.LatestMachineState().feedRate = ms.GetToolChangeRestorePoint().feedRate;
+			gb.LatestMachineState().feedRate = ms.GetToolChangeRestorePoint().originalFeedRate;
 			// We don't restore the default fan speed in case the user wants to use a different one for the new tool
 			doingToolChange = false;
 
@@ -712,7 +718,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 					}
 					if (tempMs.GetNumber() == 0 || !FileGCode()->ExecutingAll())
 					{
-						fgb->LatestMachineState().feedRate = tempMs.GetPauseRestorePoint().feedRate;
+						fgb->LatestMachineState().feedRate = tempMs.GetPauseRestorePoint().originalFeedRate;
 						if (tempMs.pausedInMacro)
 						{
 							fgb->OriginalMachineState().firstCommandAfterRestart = true;
@@ -733,7 +739,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			}
 #else
 			ms.ResumeAfterPause();
-			FileGCode()->LatestMachineState().feedRate = ms.GetPauseRestorePoint().feedRate;
+			FileGCode()->LatestMachineState().feedRate = ms.GetPauseRestorePoint().originalFeedRate;
 			if (ms.pausedInMacro)
 			{
 				FileGCode()->OriginalMachineState().firstCommandAfterRestart = true;
@@ -843,8 +849,11 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::stopped:
-		reprap.GetPrintMonitor().StoppedPrint();
-		gb.SetState(GCodeState::normal);
+		if (LockAllMovementSystemsAndWaitForStandstill(gb))
+		{
+			reprap.GetPrintMonitor().StoppedPrint();
+			gb.SetState(GCodeState::normal);
+		}
 		break;
 
 	// States used for grid probing
@@ -985,7 +994,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::gridProbing4:	// ready to lift the probe after probing the current grid probe point
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			doingManualBedProbe = false;
 			++tapsDone;
@@ -1396,7 +1405,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 
 	case GCodeState::probingAtPoint4:
 		// Executing G30. The probe wasn't triggered at the start of the move, and the probing move has been commanded.
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			// Probing move has stopped
 			reprap.GetHeat().SuspendHeaters(false);
@@ -1661,7 +1670,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 
 	case GCodeState::straightProbe3:
 		// Executing G38. The probe wasn't in target state at the start of the move, and the probing move has been commanded.
-		if (LockCurrentMovementSystemAndWaitForStandstill(gb))
+		if (WaitForEndstopOrProbingMoveToFinish(gb))
 		{
 			// Probing move has stopped
 			reprap.GetHeat().SuspendHeaters(false);

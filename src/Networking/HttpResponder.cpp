@@ -545,7 +545,7 @@ bool HttpResponder::GetJsonResponse(const char *_ecv_array request, OutputBuffer
 		const char *_ecv_array _ecv_null command = GetKeyValue("gcode");
 		NetworkGCodeInput * const httpInput = reprap.GetGCodes().GetHTTPInput();
 		// If the command is empty, just report the buffer space. This allows rr_gcode to be used to poll the buffer space without using it up.
-		if (command != nullptr && command[0] != 0 && !httpInput->Put(HttpMessage, command))
+		if (command != nullptr && command[0] != 0 && !httpInput->Put(command))
 		{
 			response->copy("{\"err\":1}");									// the command string wasn't accepted, it's probably too long
 		}
@@ -1393,6 +1393,7 @@ void HttpResponder::DoUpload() noexcept
 	size_t len;
 	if (skt->ReadBuffer(buffer, len))
 	{
+		size_t bytesWritten = 0;		// don't write than one FS buffer at once, else we may get stuck here with slow cards
 		do
 		{
 			(void)CheckAuthenticated();						// uploading may take a long time, so make sure the requester IP is not timed out
@@ -1401,6 +1402,7 @@ void HttpResponder::DoUpload() noexcept
 			const bool ok = dummyUpload || fileBeingUploaded.Write(buffer, len);
 			skt->Taken(len);
 			uploadedBytes += len;
+			bytesWritten += len;
 
 			if (!ok)
 			{
@@ -1410,7 +1412,7 @@ void HttpResponder::DoUpload() noexcept
 				SendJsonResponse("upload");
 				return;
 			}
-		} while (skt->ReadBuffer(buffer, len));
+		} while (bytesWritten < FileWriteBufLen && skt->ReadBuffer(buffer, len));
 	}
 	else if (!skt->CanRead() || millis() - timer >= HttpSessionTimeout)
 	{
