@@ -616,7 +616,15 @@ bool GCodes::StartNextGCode(GCodeBuffer& gb, const StringRef& reply) noexcept
 	{
 		const bool gotCommand =
 #if HAS_SBC_INTERFACE
+			// Two SBC-mode guards on accepting input here:
+			// - IsExecutingOnSbc: a code has been handed to DSF for processing (see SendToSbc), so don't
+			//   feed the buffer another code until that one has been resolved
+			// - IsDoingFile: while DSF is serving a file/macro on this channel, accepting a text-based
+			//   code (e.g. from PanelDue) would clear lastCodeFromSbc on the file's stack level and
+			//   misroute that file's code replies to the analog channel instead of back to DSF. Waiting
+			//   for a message-box acknowledgement is the exception, as M292 must stay answerable from PanelDue
 			!gb.IsExecutingOnSbc() &&
+			(!reprap.UsingSbcInterface() || !gb.IsDoingFile() || gb.LatestMachineState().waitingForAcknowledgement) &&
 #endif
 			(gb.GetNormalInput() != nullptr) && gb.GetNormalInput()->FillBuffer(&gb);
 		if (gotCommand)
@@ -2145,7 +2153,7 @@ bool GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated) THROWS(GCodeExc
 	// We need to check for moving unowned axes right at the start in case we need to fetch axis positions before processing the command
 	ParameterLettersBitmap axisLettersMentioned = gb.AllParameters() & allAxisLetters;
 	const bool meshCompensationInUse = (ms.moveType == 0) && IsUsingMeshCompensation(ms, axisLettersMentioned);
-	if (ms.moveType == 0 || !move.IsRawMotorMove(ms.moveType))
+	if (ms.moveType == 0)
 	{
 		if (meshCompensationInUse)
 		{
@@ -2159,6 +2167,7 @@ bool GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated) THROWS(GCodeExc
 	}
 	else
 	{
+		// Homing/raw-motor moves: tool axis mapping is not applied, so allocate axes by literal letter
 		AllocateLogicalDrivesFromLetters(gb, ms, axisLettersMentioned);
 	}
 #endif
