@@ -91,11 +91,16 @@ constexpr size_t ResumeObjectRestorePointNumber = NumVisibleRestorePoints + 1;
 
 // Details of a move that are needed only by GCodes
 // CAUTION: segmentsLeft should ONLY be changed from 0 to not 0 by calling NewMoveAvailable()!
-class MovementState final : public RawMove
+class MovementState final INHERIT_OBJECT_MODEL
 {
+protected:
+	DECLARE_OBJECT_MODEL_WITH_ARRAYS
+
 public:
+	RawMove raw;
+
 #if SUPPORT_ASYNC_MOVES
-	AxesBitmap GetAxesAndExtrudersOwned() const noexcept { return axesAndExtrudersOwned; }	// Get the axes and extruders that this movement system owns
+	AxesBitmap GetAxesAndExtrudersOwned() const noexcept { return raw.axesAndExtrudersOwned; }	// Get the axes and extruders that this movement system owns
 	ParameterLettersBitmap GetOwnedAxisLetters() const noexcept { return ownedAxisLetters; } // Get the letters denoting axes that this movement system owns
 	LogicalDrivesBitmap AllocateAxes(AxesBitmap axes, ParameterLettersBitmap axisLetters) noexcept;	// try to allocate the requested axes, if we can't then return the logical drives we can't allocate
 	LogicalDrivesBitmap AllocateDrives(LogicalDrivesBitmap drivesNeeded) noexcept;			// try to allocate logical drives directly
@@ -112,7 +117,6 @@ public:
 	void ChangeSingleEndpointAfterHoming(size_t drive, int32_t ep) noexcept;
 	void AdjustMotorPositions(const float adjustment[], size_t numMotors) noexcept;			// adjust the endpoints following delta calibration
 	float LiveMachineCoordinate(unsigned int axisOrExtruder) const noexcept;				// Get a single coordinate for reporting e.g.in the OM
-	void ForceLiveCoordinatesUpdate() noexcept { forceLiveCoordinatesUpdate = true; }		// Force the stored coordinates to be updated next time LiveMachineCoordinate is called
 	void UpdateOwnedDriveEndpointsFromMotors() noexcept;									// fetch lastKnownEndpoints from the motors for our owned drives and update the endpoints in our DDA ring
 	void UpdateOwnedDriveLastEndpoints(const int32_t endPoints[MaxAxes]) noexcept;			// update lastKnownEndpoints for our owned drives
 
@@ -243,9 +247,6 @@ public:
 
 private:
 	MovementSystemNumber msNumber;
-	mutable bool forceLiveCoordinatesUpdate = true;					// true if we want to force latestLiveCoordinates to be updated
-	mutable float latestLiveCoordinates[MaxAxesPlusExtruders];		// the most recent set of live coordinates that we fetched
-	mutable uint32_t latestLiveCoordinatesFetchedAt = 0;			// when we fetched the live coordinates
 
 	static int32_t lastKnownEndpoints[MaxAxesPlusExtruders];		// the last stored position of the logical drives
 	static int32_t endpointsAtSimulationStart[MaxAxesPlusExtruders];	// the endpoints when we started a simulation
