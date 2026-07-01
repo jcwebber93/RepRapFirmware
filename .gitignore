@@ -31,3 +31,5 @@
 /.clang-format
 /src/Temp/
 /.settings/
+src/Networking/MQTT/MQTT_C/.project
+.cproject
