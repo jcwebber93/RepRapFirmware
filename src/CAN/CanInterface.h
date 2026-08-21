@@ -118,7 +118,12 @@ namespace CanInterface
 #if SUPPORT_ACCELEROMETERS
 	GCodeResult StartAccelerometer(DriverId device, uint8_t axes, uint16_t numSamples, uint8_t mode, const GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);
 #endif
-	GCodeResult StartClosedLoopDataCollection(DriverId device, uint16_t filter, uint16_t numSamples, uint16_t p_rateRequested, uint8_t p_movementRequested, uint8_t mode, const GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);
+	// 'filter' must be uint32_t: there are more than 16 recordable closed-loop variables (see the
+	// CL_RECORD_ bits in Duet3Common.h) and CanMessageStartClosedLoopDataCollection::filter is uint32_t.
+	// Narrowing it here silently drops every channel above bit 15, which the expansion board then never
+	// records - and because the two boards go on to disagree about how many bytes a sample occupies, the
+	// symptom is a "Bad data received" line in the CSV rather than a missing column.
+	GCodeResult StartClosedLoopDataCollection(DriverId device, uint32_t filter, uint16_t numSamples, uint16_t p_rateRequested, uint8_t p_movementRequested, uint8_t mode, const GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);
 	GCodeResult ProcessM655(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);
 
 #if SUPPORT_MULTICAST_DISCOVERY

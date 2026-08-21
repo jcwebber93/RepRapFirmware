@@ -37,74 +37,81 @@ static std::atomic<FileStore *_ecv_null> closedLoopFile(nullptr);	// This is non
 static unsigned int expectedRemoteSampleNumber = 0;
 static CanAddress expectedRemoteBoardAddress = CanId::NoAddress;
 
+// Description of every recordable closed-loop variable, in CL_RECORD_ bit order.
+//
+// This is the single source of truth for both the CSV heading line and the decoding of received samples.
+// Those used to be two separate if-chains that had to be kept in the same order by hand, and an earlier
+// attempt to extend them failed partly because a heading array was written in a different order from the
+// bits and then "corrected" with a bitmask-shuffling expression. Driving both from one table in bit
+// order removes the possibility of that class of mistake: a new channel is one row here, plus the
+// matching size entry in Duet3Common.h and the matching write in the expansion board's CollectSample().
+//
+// The order MUST match the CL_RECORD_ bit order and ClosedLoopDataSizes[] in Duet3Common.h - that is the
+// order the expansion board writes fields to the wire.
+enum class ClFieldKind : uint8_t { i32, f32, f16, u16, i16 };
+
+struct ClosedLoopChannel
+{
+	uint32_t bit;
+	const char *_ecv_array heading;
+	ClFieldKind kind;
+	const char *_ecv_array format;			// printf format for the value, excluding the leading comma
+};
+
+static constexpr ClosedLoopChannel ClosedLoopChannels[] =
+{
+	{ CL_RECORD_RAW_ENCODER_READING,	"Raw Encoder Reading",	ClFieldKind::i32,	"%" PRIi32 },
+	{ CL_RECORD_CURRENT_MOTOR_STEPS,	"Measured Motor Steps",	ClFieldKind::f32,	"%.2f" },
+	{ CL_RECORD_TARGET_MOTOR_STEPS,		"Target Motor Steps",	ClFieldKind::f32,	"%.2f" },
+	{ CL_RECORD_CURRENT_ERROR,			"Current Error",		ClFieldKind::f32,	"%.2f" },
+	{ CL_RECORD_PID_CONTROL_SIGNAL,		"PID Control Signal",	ClFieldKind::f16,	"%.1f" },
+	// 4 decimal places rather than 1: this matches the real precision available in the underlying
+	// half-float storage, and costs nothing on the PID terms' larger dynamic range.
+	{ CL_RECORD_PID_P_TERM,				"PID P Term",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_PID_I_TERM,				"PID I Term",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_PID_D_TERM,				"PID D Term",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_CURRENT_STEP_PHASE,		"Measured Step Phase",	ClFieldKind::u16,	"%u" },
+	{ CL_RECORD_DESIRED_STEP_PHASE,		"Desired Step Phase",	ClFieldKind::u16,	"%u" },
+	// u16 like the two step-phase channels above it: the expansion board writes PutU16, and phase shift is
+	// an angle in the same units. Currently always 0 - the channel has never had a source.
+	{ CL_RECORD_PHASE_SHIFT,			"Phase Shift",			ClFieldKind::u16,	"%u" },
+	{ CL_RECORD_COIL_A_CURRENT,			"Coil A Current",		ClFieldKind::i16,	"%d" },
+	{ CL_RECORD_COIL_B_CURRENT,			"Coil B Current",		ClFieldKind::i16,	"%d" },
+	{ CL_RECORD_PID_V_TERM,				"PID V Term",			ClFieldKind::f16,	"%.1f" },
+	{ CL_RECORD_PID_A_TERM,				"PID A Term",			ClFieldKind::f16,	"%.1f" },
+	{ CL_RECORD_PID_J_TERM,				"PID J Term",			ClFieldKind::f16,	"%.1f" },
+	{ CL_RECORD_MEASURED_VELOCITY,		"Measured Velocity",	ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_PHASE_CURRENT_A,		"Phase Current A",		ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_PHASE_CURRENT_B,		"Phase Current B",		ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_PHASE_CURRENT_C,		"Phase Current C",		ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_CURRENT_D,				"Current D",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_CURRENT_Q,				"Current Q",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_VOLTAGE_D,				"Voltage D",			ClFieldKind::f16,	"%.4f" },
+	{ CL_RECORD_VOLTAGE_Q,				"Voltage Q",			ClFieldKind::f16,	"%.4f" }
+};
+
+static_assert(ARRAY_SIZE(ClosedLoopChannels) == NumClosedLoopRecordChannels,
+				"ClosedLoopChannels must describe every CL_RECORD_ channel");
+
 static bool OpenDataCollectionFile(const char *_ecv_array filename, unsigned int size) noexcept
 {
 	// Create the file
 	FileStore *_ecv_null const f = MassStorage::OpenFile(filename, OpenMode::write, size);
 	if (f == nullptr) { return false; }
 
-	// Write the header line
+	// Write the header line. Driven from ClosedLoopChannels[] so that the column order here cannot drift
+	// away from the order ProcessReceivedData() decodes them in.
 	{
-		//static constexpr const char *headings[17] =
-		//{
-		//	",Raw Encoder Reading",
-		//	",Measured Motor Steps",
-		//	",Target Motor Steps",
-		//	",Current Error",
-		//	",PID Control Signal",
-		//	",PID P Term",
-		//	",PID I Term",
-		//	",PID D Term",
-
-			// The next two are out of order in the filter bits, they come later on
-		//	",PID V Term",
-		//	",PID A Term",
-		//	",PID J Term",
-
-		//	",Measured Step Phase",
-		//	",Desired Step Phase",
-		//	",Phase Shift",
-		//	",Coil A Current",
-		//	",Coil B Current",
-		//	",Measured Velocity",
-			// ",Unknown",
-		//};
 		String<StringLength500> temp;
 		temp.copy("Sample,Timestamp");
-		//uint32_t filter = (filterRequested & (CL_RECORD_CURRENT_STEP_PHASE - 1))
-		//				//| //((filterRequested & CL_RECORD_MEASURED_VELOCITY) >> 12)
-		//				//| //((filterRequested & (CL_RECORD_PID_V_TERM | CL_RECORD_PID_A_TERM)) >> 5)
-		//				//| //((filterRequested & CL_RECORD_PID_J_TERM) >> 5)
-		//				//| //((filterRequested & (CL_RECORD_CURRENT_STEP_PHASE | CL_RECORD_DESIRED_STEP_PHASE | CL_RECORD_PHASE_SHIFT | CL_RECORD_COIL_A_CURRENT | CL_RECORD_COIL_B_CURRENT)) << 4);
-		//				| ((filterRequested & (CL_RECORD_PID_V_TERM | CL_RECORD_PID_A_TERM)) >> 5)
-		//				| ((filterRequested & CL_RECORD_PID_J_TERM) >> 5)
-		//				| ((filterRequested & (CL_RECORD_CURRENT_STEP_PHASE | CL_RECORD_DESIRED_STEP_PHASE | CL_RECORD_PHASE_SHIFT | CL_RECORD_COIL_A_CURRENT | CL_RECORD_COIL_B_CURRENT | CL_RECORD_MEASURED_VELOCITY)) << 3);
-		//for (unsigned int i = 0; filter != 0; ++i)
-		//{
-		//	if (filter & 1u)
-		//	{
-		//		temp.cat(headings[i]);
-		//	}
-		//	filter >>= 1;
-		//}
-		// The order of these checks MUST match the order they are read in ProcessReceivedData()
-		if (filterRequested & CL_RECORD_RAW_ENCODER_READING)	{ temp.cat(",Raw Encoder Reading"); }
-		if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS)  	{ temp.cat(",Measured Motor Steps"); }
-		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)  	{ temp.cat(",Target Motor Steps"); }
-		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ temp.cat(",Current Error"); }
-		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ temp.cat(",PID Control Signal"); }
-		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ temp.cat(",PID P Term"); }
-		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ temp.cat(",PID I Term"); }
-		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ temp.cat(",PID D Term"); }
-		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ temp.cat(",Measured Step Phase"); }
-		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ temp.cat(",Desired Step Phase"); }
-		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ temp.cat(",Phase Shift"); }
-		if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ temp.cat(",Coil A Current"); }
-		if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ temp.cat(",Coil B Current"); }
-		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ temp.cat(",PID V Term"); }
-		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ temp.cat(",PID A Term"); }
-		if (filterRequested & CL_RECORD_PID_J_TERM) 			{ temp.cat(",PID J Term"); }
-		if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ temp.cat(",Measured Velocity"); }
+		for (const ClosedLoopChannel& chan : ClosedLoopChannels)
+		{
+			if (filterRequested & chan.bit)
+			{
+				temp.cat(',');
+				temp.cat(chan.heading);
+			}
+		}
 
 		temp.cat("\n");
 		f->Write(temp.c_str());							// this call could result in the file becoming invalidated
@@ -175,6 +182,17 @@ GCodeResult ClosedLoop::StartDataCollection(DriverId driverId, GCodeBuffer& gb, 
 	gb.TryGetUIValue('D', parsedD, seen);
 	gb.TryGetLimitedUIValue('R', parsedR, seen, std::numeric_limits<uint16_t>::max() + 1);
 	gb.TryGetUIValue('V', parsedV, seen);
+
+	// A whole sample has to fit in one CAN data message - see MaxClosedLoopSampleBytes in Duet3Common.h.
+	// There are more recordable variables defined than will fit at once, so reject an over-budget request
+	// here with the numbers the user needs in order to drop something. Without this the expansion board's
+	// packing loop would write past the end of the CAN message payload.
+	if (!ClosedLoopSampleFits(parsedD))
+	{
+		reply.printf("Requested variables need %u bytes per sample but the limit is %u; select fewer",
+						(unsigned int)ClosedLoopSampleLength(parsedD), (unsigned int)MaxClosedLoopSampleBytes);
+		return GCodeResult::error;
+	}
 
 	// Validation passed - store the values
 	modeRequested = parsedA;
@@ -261,23 +279,24 @@ void ClosedLoop::ProcessReceivedData(CanAddress src, const CanMessageClosedLoopD
 				// Compile the data
 				String<StringLength256> currentLine;
 				currentLine.printf("%u,%.2f", msg.firstSampleNumber + sampleIndex, (double)FetchLEF32(dataPtr));	// sample number and time stamp
-				if (filterRequested & CL_RECORD_RAW_ENCODER_READING)	{ currentLine.catf(",%" PRIi32,	FetchLEI32(dataPtr)); }
-				if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS)  	{ currentLine.catf(",%.2f", (double)FetchLEF32(dataPtr)); }
-				if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)  	{ currentLine.catf(",%.2f", (double)FetchLEF32(dataPtr)); }
-				if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ currentLine.catf(",%.2f", (double)FetchLEF32(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_P_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_I_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_D_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ currentLine.catf(",%u",	FetchLEU16(dataPtr)); }
-				if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ currentLine.catf(",%u",	FetchLEU16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ currentLine.catf(",%.4f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ currentLine.catf(",%d",	FetchLEI16(dataPtr)); }
-				if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ currentLine.catf(",%d",	FetchLEI16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_V_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_A_TERM)  			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_PID_J_TERM) 			{ currentLine.catf(",%.1f", (double)FetchLEF16(dataPtr)); }
-				if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ currentLine.catf(",%.4f", (double)FetchLEF16(dataPtr)); } 
+				// Decoded from the same table that produced the heading line, so the columns cannot get
+				// out of step with their names. Each Fetch advances dataPtr by that field's width, so the
+				// iteration order here IS the wire order.
+				for (const ClosedLoopChannel& chan : ClosedLoopChannels)
+				{
+					if (filterRequested & chan.bit)
+					{
+						currentLine.cat(',');
+						switch (chan.kind)
+						{
+						case ClFieldKind::i32:	currentLine.catf(chan.format, FetchLEI32(dataPtr)); break;
+						case ClFieldKind::f32:	currentLine.catf(chan.format, (double)FetchLEF32(dataPtr)); break;
+						case ClFieldKind::f16:	currentLine.catf(chan.format, (double)FetchLEF16(dataPtr)); break;
+						case ClFieldKind::u16:	currentLine.catf(chan.format, FetchLEU16(dataPtr)); break;
+						case ClFieldKind::i16:	currentLine.catf(chan.format, FetchLEI16(dataPtr)); break;
+						}
+					}
+				}
 				currentLine.cat("\n");
 
 				// Write the data
