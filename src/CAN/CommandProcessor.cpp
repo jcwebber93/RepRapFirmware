@@ -643,8 +643,8 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 				uint8_t fragmentNumber = 0;
 				for (;;)
 				{
-					const size_t fragmentLength = min<size_t>(totalLength - lengthDone, CanMessageStandardReply::MaxTextLength);
-					memcpy(msg->text, reply.c_str() + lengthDone, fragmentLength);
+					const size_t fragmentLength = min<size_t>(totalLength - lengthDone, msg->GetMaxTextLength());
+					memcpy(msg->GetText(), reply.c_str() + lengthDone, fragmentLength);
 					lengthDone += fragmentLength;
 					buf->dataLength = msg->GetActualDataLength(fragmentLength);
 					msg->fragmentNumber = fragmentNumber;
@@ -751,7 +751,7 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 					CanMessageStandardReply * const msg = buf->SetupResponseMessage<CanMessageStandardReply>(requestId, CanInterface::GetCanAddress(), srcAddress);
 					buf->useBrs = requestUsedBrs;
 					msg->resultCode = (uint16_t)GCodeResult::ok;
-					msg->text[0] = 0;
+					msg->GetText()[0] = 0;
 					buf->dataLength = msg->GetActualDataLength(0);
 					msg->fragmentNumber = 0;
 					msg->moreFollows = false;

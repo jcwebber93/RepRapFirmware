@@ -842,7 +842,7 @@ GCodeResult CanInterface::SendRequestAndGetCustomReply(CanMessageBuffer *buf, Ca
 					const size_t textLength = buf->msg.standardReply.GetTextLength(buf->dataLength);
 					if (textLength != 0)			// avoid concatenating blank lines to existing output
 					{
-						reply.lcatn(buf->msg.standardReply.text, textLength);
+						reply.lcatn(buf->msg.standardReply.GetText(), textLength);
 					}
 					if (extra != nullptr)
 					{
@@ -857,7 +857,7 @@ GCodeResult CanInterface::SendRequestAndGetCustomReply(CanMessageBuffer *buf, Ca
 				}
 				else
 				{
-					reply.catn(buf->msg.standardReply.text, buf->msg.standardReply.GetTextLength(buf->dataLength));
+					reply.catn(buf->msg.standardReply.GetText(), buf->msg.standardReply.GetTextLength(buf->dataLength));
 				}
 				if (!buf->msg.standardReply.moreFollows)
 				{
@@ -879,7 +879,7 @@ GCodeResult CanInterface::SendRequestAndGetCustomReply(CanMessageBuffer *buf, Ca
 				if (buf->id.MsgType() == CanMessageType::standardReply)
 				{
 					reprap.GetPlatform().MessageF(WarningMessage, "Discarded std reply src=%u RID=%u exp=%u \"%.*s\"\n",
-													buf->id.Src(), (unsigned int)buf->msg.standardReply.requestId, rid, buf->msg.standardReply.GetTextLength(buf->dataLength), buf->msg.standardReply.text);
+													buf->id.Src(), (unsigned int)buf->msg.standardReply.requestId, rid, buf->msg.standardReply.GetTextLength(buf->dataLength), buf->msg.standardReply.GetText());
 				}
 				else
 				{
