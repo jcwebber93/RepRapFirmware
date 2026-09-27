@@ -326,9 +326,10 @@ bool GCodes::HandleGcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 						// Should we queue this code?
 						// Don't queue any GCodes if there are segments not yet picked up by Move, because in the event that a segment corresponds to no movement,
 						// the move gets discarded, which throws out the count of scheduled moves and hence the synchronisation
-						if (gb.CanQueueCodes() && GCodeQueue::ShouldQueueG10(gb, allAxisLetters))
+						const MovementState& ms = GetMovementState(gb);
+						if (gb.CanQueueCodes() && ms.codeQueue->ShouldQueueG10(gb, allAxisLetters))
 						{
-							if (GetMovementState(gb).segmentsLeft == 0 && GetMovementState(gb).codeQueue->QueueCode(gb))
+							if (ms.segmentsLeft == 0 && ms.codeQueue->QueueCode(gb))
 							{
 								HandleReply(gb, GCodeResult::ok, "");
 								return true;
@@ -684,15 +685,19 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 	// Can we queue this code?
 	// Don't queue any GCodes if there are segments not yet picked up by Move, because in the event that a segment corresponds to no movement,
 	// the move gets discarded, which throws out the count of scheduled moves and hence the synchronisation
-	if (gb.CanQueueCodes() && GCodeQueue::ShouldQueueMCode(gb))
+	if (gb.CanQueueCodes())
 	{
-		if (GetMovementState(gb).segmentsLeft == 0 && GetMovementState(gb).codeQueue->QueueCode(gb))
+		const MovementState& ms = GetMovementState(gb);
+		if (ms.codeQueue->ShouldQueueMCode(gb))
 		{
-			HandleReply(gb, GCodeResult::ok, "");
-			return true;
-		}
+			if (ms.segmentsLeft == 0 && ms.codeQueue->QueueCode(gb))
+			{
+				HandleReply(gb, GCodeResult::ok, "");
+				return true;
+			}
 
-		return false;		// we should queue this code but we can't yet, so wait until we can either execute it or queue it
+			return false;		// we should queue this code but we can't yet, so wait until we can either execute it or queue it
+		}
 	}
 
 #if HAS_SBC_INTERFACE
@@ -710,7 +715,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 			|| (code >= 470 && code <= 472)
 			||  code == 503 || code == 505
 			||  code == 540 || (code >= 550 && code <= 552) || (code >= 586 && code <= 589)
-			||  code == 596 || code == 606
+			||  code == 596 || code == 598 || code == 606
 			||  code == 703
 			||  code == 905 || code == 929 || code == 997 || code == 999
 		   )
@@ -740,7 +745,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 			&& code != 558
 #endif
 			&& code != 569 && code != 576 && code != 581 && code != 586 && code != 587		// these are the only M-codes we implement that can have fractional parts
-#if SUPPORT_PHASE_STEPPING
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CAN_EXPANSION
 			&& code != 970
 #endif
 		)
@@ -1984,7 +1989,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 #if defined(DUET3_ATE)
 				reply.lcatf("ATE firmware version %s date %s %s", Duet3Ate::GetFirmwareVersionString(), Duet3Ate::GetFirmwareDateString(), Duet3Ate::GetFirmwareTimeString());
 #else
-				reply.catf(" FIRMWARE_DATE: %s%s", DateText, TimeSuffix);
+				reply.catf(" FIRMWARE_DATE: %s", DateTimeText);
 #endif
 				break;
 
@@ -2002,10 +2007,33 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 
 					if (gb.Seen('P'))
 					{
-						// Wait for the heaters associated with the specified tool to be ready
-						if (!ToolHeatersAtSetTemperatures(Tool::GetLockedTool(gb.GetIValue()).Ptr(), true, tolerance, gb.IsFileChannel()))
+						// Wait for the heaters associated with the specified tool(s) to be ready
+						uint32_t toolNumbers[MaxTools];
+						size_t toolCount = MaxTools;
+						gb.GetUnsignedArray(toolNumbers, toolCount, false);
+
+						if (toolCount == 0)
 						{
-							return false;
+							// If no tool numbers are given, wait for all tools
+							ReadLocker lock(Tool::toolListLock);
+							for (const Tool *_ecv_null tool = Tool::GetToolList(); tool != nullptr; tool = tool->Next())
+							{
+								if (!ToolHeatersAtSetTemperatures(tool, true, tolerance, gb.IsFileChannel()))
+								{
+									return false;
+								}
+							}
+						}
+						else
+						{
+							for (size_t i = 0; i < toolCount; i++)
+							{
+								ReadLockedPointer<Tool> tool = Tool::GetLockedTool((int)toolNumbers[i]);
+								if (!ToolHeatersAtSetTemperatures(tool.Ptr(), true, tolerance, gb.IsFileChannel()))
+								{
+									return false;
+								}
+							}
 						}
 						seen = true;
 					}
@@ -2070,13 +2098,40 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 						seen = true;
 					}
 
-					// Wait for the current tool and slow heaters to be ready
-					if (!seen && (
-							!ToolHeatersAtSetTemperatures(GetMovementState(gb).GetLockedCurrentTool().Ptr(), true, tolerance, gb.IsFileChannel()) ||
-							!reprap.GetHeat().SlowHeatersAtSetTemperatures(tolerance, gb.IsFileChannel())
-						))
+					// Wait for the tools of this motion system, unallocated tools and slow heaters to be ready
+					if (!seen)
 					{
-						return false;
+						{
+#if SUPPORT_ASYNC_MOVES
+							const MovementState& ms = GetMovementState(gb);
+#endif
+							ReadLocker lock(Tool::toolListLock);
+							for (const Tool *_ecv_null tool = Tool::GetToolList(); tool != nullptr; tool = tool->Next())
+							{
+#if SUPPORT_ASYNC_MOVES
+								bool usedByOtherMotionSystem = false;
+								for (size_t i = 0; i < numMotionSystemsUsed; i++)
+								{
+									if (&moveStates[i] != &ms && moveStates[i].currentTool == tool)
+									{
+										usedByOtherMotionSystem = true;
+									}
+								}
+								if (usedByOtherMotionSystem)
+								{
+									continue;
+								}
+#endif
+								if (!ToolHeatersAtSetTemperatures(tool, true, tolerance, gb.IsFileChannel()))
+								{
+									return false;
+								}
+							}
+						}
+						if (!reprap.GetHeat().SlowHeatersAtSetTemperatures(tolerance, gb.IsFileChannel()))
+						{
+							return false;
+						}
 					}
 				}
 				break;
@@ -2556,7 +2611,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 						}
 					}
 
-#if SUPPORT_S_CURVE
+#if SUPPORT_3RD_ORDER
 					if (frac < 1 && gb.Seen('T'))
 					{
 						if (!LockAllMovementSystemsAndWaitForStandstill(gb))
@@ -2569,7 +2624,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 #endif
 					if (seen)
 					{
-#if SUPPORT_S_CURVE
+#if SUPPORT_3RD_ORDER
 						if (frac < 1)
 						{
 							move.UpdateSCurveFlagAndJerk();
@@ -2591,7 +2646,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 							reply.catf("%c%.1f", sep, (double)InverseConvertAcceleration(move.Acceleration(ExtruderToLogicalDrive(extruder), frac == 1)));
 							sep = ':';
 						}
-#if SUPPORT_S_CURVE
+#if SUPPORT_3RD_ORDER
 						if (frac < 1)
 						{
 							reply.catf(", acceleration time %.2f sec", (double)(move.AccelerationTime() * (1.0/StepClockRate)));
@@ -2599,10 +2654,26 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 #endif
 					}
 
-#if SUPPORT_S_CURVE
-					if (frac < 1 && move.AccelerationTime() != 0.0 && !move.IsUsingSCurve())
+#if SUPPORT_3RD_ORDER
+					if (frac < 1 && move.AccelerationTime() != 0.0)
 					{
-						reply.lcat("Acceleration time (S-curve acceleration) is disabled because phase stepping is not enabled");
+						if (!move.IsUsingSCurve())
+						{
+							reply.lcat("Acceleration time (S-curve acceleration) is disabled because phase stepping is not enabled");
+							result = GCodeResult::warning;
+						}
+# if SUPPORT_CAN_EXPANSION
+						if (move.AnyDriveHasRemoteDriver())
+						{
+							reply.lcat("S-curve acceleration is not applied to CAN-connected drivers");
+							result = GCodeResult::warning;
+						}
+# endif
+					}
+#else
+					if (frac < 1 && gb.Seen('T'))
+					{
+						reply.lcat("S-curve acceleration (T parameter) is not supported on this board");
 						result = GCodeResult::warning;
 					}
 #endif
@@ -2751,13 +2822,14 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 						const float extrusionFactor = gb.GetPositiveFValue() * 0.01;
 						if (extrusionFactor >= 0.01)
 						{
+							const bool isFileChannel = gb.IsFileChannel();
 							if (seenD)
 							{
-								ChangeExtrusionFactor(extruder, extrusionFactor);
+								ChangeExtrusionFactor(extruder, extrusionFactor, isFileChannel);
 							}
 							else
 							{
-								ct->IterateExtruders([this, extrusionFactor](unsigned int extr) { ChangeExtrusionFactor(extr, extrusionFactor); });
+								ct->IterateExtruders([this, extrusionFactor, isFileChannel](unsigned int extr) { ChangeExtrusionFactor(extr, extrusionFactor, isFileChannel); });
 							}
 						}
 					}
@@ -2868,7 +2940,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 							reprap.MoveUpdated();
 							if (IsAxisHomed(axis))
 							{
-								//TODO find which movement system owns the axis concerned and push the babystepping through that one
+								//TODO find which movement system owns the axis concerned and push the babystepping through that one - currently we assume motion system 0
 								const float amountPushed = reprap.GetMove().PushBabyStepping(0, axis, differences[axis]);
 								ms.initialCoords[axis] += amountPushed;
 
@@ -2882,7 +2954,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 							}
 						}
 
-						if (canMove && haveResidual && ms.segmentsLeft == 0 && reprap.GetMove().NoLiveMovement())
+						if (canMove && haveResidual && ms.segmentsLeft == 0 && reprap.GetMove().NoLiveMovement(ms.GetNumber()))
 						{
 							// The pipeline is empty, so execute the babystepping move immediately if it is safe to do
 							SetMoveBufferDefaults(ms);
@@ -3687,10 +3759,10 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 				result = DefineGrid(gb, reply);
 				break;
 
-			case 558: // Set or report Z probe type and for which axes it is used; M558.1 calibrate Z probe; M558.2 calibrate scanning Z probe drive strength
+			case 558: // Set or report Z probe type and for which axes it is used; M558.1 calibrate Z probe; M558.2 calibrate scanning Z probe drive strength; M558.4 tare load cell probe
 				result =
 #if SUPPORT_SCANNING_PROBES
-						(gb.GetCommandFraction() > 3) ? TryMacroFile(gb) :
+						(gb.GetCommandFraction() > 4) ? TryMacroFile(gb) :
 #endif
 							platform.GetEndstops().HandleM558(gb, reply);
 				break;
@@ -3768,13 +3840,18 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 						seen = true;
 						noMovesBeforeHoming = (gb.GetIValue() > 0);
 					}
+					if (gb.Seen('R'))
+					{
+						seen = true;
+						limitAxesRelative = (gb.GetIValue() > 0);
+					}
 					if (seen)
 					{
 						reprap.MoveUpdated();
 					}
 					else
 					{
-						reply.printf("Movement outside the bed is %spermitted, movement before homing is %spermitted", (limitAxes) ? "not " : "", (noMovesBeforeHoming) ? "not " : "");
+						reply.printf("Movement outside the bed is %spermitted, movement before homing is %spermitted, relative moves are %sclamped to the axis limits", (limitAxes) ? "not " : "", (noMovesBeforeHoming) ? "not " : "", (limitAxesRelative) ? "" : "not ");
 					}
 				}
 				break;
@@ -4629,7 +4706,13 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeEx
 				result = RaiseEvent(gb, reply);
 				break;
 
-#if SUPPORT_PHASE_STEPPING
+#if SUPPORT_CAN_EXPANSION
+			case 959:	// configure expansion board connection timeout
+				result = reprap.GetExpansion().ConfigureConnectionTimeout(gb, reply);
+				break;
+#endif
+
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CAN_EXPANSION
 			case 970:	// configure step mode (phase stepping)
 				result = ConfigureStepMode(gb, reply);
 				break;
@@ -4907,6 +4990,8 @@ bool GCodes::HandleResult(GCodeBuffer& gb, GCodeResult rslt, const StringRef& re
 		return true;
 	}
 
+	// The other results that are converted to errors or warnings below print the command themselves
+	const bool addCommandPrefix = rslt == GCodeResult::error || rslt == GCodeResult::warning || rslt == GCodeResult::noCanBuffer || rslt == GCodeResult::canResponseTimeout;
 	switch (rslt)
 	{
 	case GCodeResult::notFinished:
@@ -4973,27 +5058,26 @@ bool GCodes::HandleResult(GCodeBuffer& gb, GCodeResult rslt, const StringRef& re
 
 	case GCodeResult::noCanBuffer:
 		reply.lcat(NoCanBufferMessage);
+		rslt = GCodeResult::error;
 		break;
 
 	case GCodeResult::canResponseTimeout:
 		// Usually we have a more detailed message in 'reply' already, but if not then add a standard message
 		if (reply.IsEmpty()) { reply.copy("CAN response timeout"); }
+		rslt = GCodeResult::error;
 		break;
 #endif
 
-	case GCodeResult::error:
-	case GCodeResult::warning:
-		if (!gb.IsDoingLocalFile())
-		{
-			String<StringLength50> scratchString;
-			gb.PrintCommand(scratchString.GetRef());
-			reply.Prepend(": ");
-			reply.Prepend(scratchString.c_str());
-		}
-		break;
-
 	default:
 		break;
+	}
+
+	if (addCommandPrefix && !gb.IsDoingLocalFile())
+	{
+		String<StringLength100> scratchString;
+		gb.PrintCommand(scratchString.GetRef());
+		reply.Prepend(": ");
+		reply.Prepend(scratchString.c_str());
 	}
 
 	if (gb.LatestMachineState().GetState() == GCodeState::normal)

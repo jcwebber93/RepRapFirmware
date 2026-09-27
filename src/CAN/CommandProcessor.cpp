@@ -165,7 +165,7 @@ pre(buf->id.MsgType() == CanMessageType::firmwareBlockRequest)
 
 // Handle an input state change message
 // This is the old version, retained for now for compatibility with expansion boards running older firmware. Remove it in due course.
-static void HandleInputStateChangedV1(const CanMessageInputChangedV1& msg, CanAddress src, uint16_t timeStamp) noexcept
+static void HandleInputStateChangedV1(const CanMessageInputChangedV1& msg, CanAddress src) noexcept
 {
 	bool endstopStatesChanged = false;
 	Platform& p = reprap.GetPlatform();
@@ -176,22 +176,23 @@ static void HandleInputStateChangedV1(const CanMessageInputChangedV1& msg, CanAd
 		switch (handle.parts.type)
 		{
 		case RemoteInputHandle::typeEndstop:
-			p.GetEndstops().HandleRemoteEndstopChange(src, handle.parts.major, handle.parts.minor, timeStamp, state);
+			p.GetEndstops().HandleRemoteEndstopChange(src, handle.parts.major, handle.parts.minor, StepTimer::GetTimerTicks(), state);
 			endstopStatesChanged = true;
 			break;
 
 		case RemoteInputHandle::typeZprobe:
-			p.GetEndstops().HandleRemoteZProbeChange(src, handle.parts.major, handle.parts.minor, timeStamp, state, msg.GetEntryReading(i));
+			p.GetEndstops().HandleRemoteZProbeChange(src, handle.parts.major, handle.parts.minor, StepTimer::GetTimerTicks(), state, msg.GetEntryReading(i));
 			endstopStatesChanged = true;
 			break;
 
 		case RemoteInputHandle::typeGpIn:
 			p.HandleRemoteGpInChange(src, handle.parts.major, handle.parts.minor, state);
+			endstopStatesChanged = true;					// the port may be bound to an extruder endstop, see the E parameter of M574
 			break;
 
 		case RemoteInputHandle::typeStallEndstop:
 			// In this case there should be exactly one handle and the 'reading' is a bitmap of stalled drivers
-			p.GetEndstops().HandleStalledRemoteDrivers(src, LocalDriversBitmap((LocalDriversBitmap::BaseType)msg.GetEntryReading(i)), timeStamp);
+			p.GetEndstops().HandleStalledRemoteDrivers(src, LocalDriversBitmap((LocalDriversBitmap::BaseType)msg.GetEntryReading(i)), StepTimer::GetTimerTicks());
 			break;
 
 		default:
@@ -217,22 +218,23 @@ static void HandleInputStateChangedV2(const CanMessageInputChangedV2& msg, CanAd
 		switch (handle.parts.type)
 		{
 		case RemoteInputHandle::typeEndstop:
-			p.GetEndstops().HandleRemoteEndstopChange(src, handle.parts.major, handle.parts.minor, msg.GetWhen(i), state);
+			p.GetEndstops().HandleRemoteEndstopChange(src, handle.parts.major, handle.parts.minor, CanInterface::Convert16bitReceivedTimeStampTo32bits(msg.GetWhen(i)), state);
 			endstopStatesChanged = true;
 			break;
 
 		case RemoteInputHandle::typeZprobe:
-			p.GetEndstops().HandleRemoteZProbeChange(src, handle.parts.major, handle.parts.minor, msg.GetWhen(i), msg.GetEntryReading(i), state);
+			p.GetEndstops().HandleRemoteZProbeChange(src, handle.parts.major, handle.parts.minor, CanInterface::Convert16bitReceivedTimeStampTo32bits(msg.GetWhen(i)), state, msg.GetEntryReading(i));
 			endstopStatesChanged = true;
 			break;
 
 		case RemoteInputHandle::typeGpIn:
 			p.HandleRemoteGpInChange(src, handle.parts.major, handle.parts.minor, state);
+			endstopStatesChanged = true;					// the port may be bound to an extruder endstop, see the E parameter of M574
 			break;
 
 		case RemoteInputHandle::typeStallEndstop:
 			// In this case there should be exactly one handle and the 'reading' is a bitmap of stalled drivers
-			p.GetEndstops().HandleStalledRemoteDrivers(src, LocalDriversBitmap((LocalDriversBitmap::BaseType)msg.GetEntryReading(i)), msg.GetWhen(i));
+			p.GetEndstops().HandleStalledRemoteDrivers(src, LocalDriversBitmap((LocalDriversBitmap::BaseType)msg.GetEntryReading(i)), CanInterface::Convert16bitReceivedTimeStampTo32bits(msg.GetWhen(i)));
 			break;
 
 		default:
@@ -253,7 +255,7 @@ static GCodeResult EutGetInfo(const CanMessageReturnInfo& msg, const StringRef& 
 	switch (msg.type)
 	{
 	case CanMessageReturnInfo::typeFirmwareVersion:
-		reply.printf("%s firmware version " VERSION " (%s%s)", reprap.GetPlatform().GetElectronicsString(), DateText, TimeSuffix);
+		reply.printf("%s firmware version " VERSION " (%s)", reprap.GetPlatform().GetElectronicsString(), DateTimeText);
 		break;
 
 	case CanMessageReturnInfo::typeBoardName:
@@ -526,7 +528,7 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 
 			case CanMessageType::setDriverStates:
 				requestId = buf->msg.multipleDrivesRequestUint16.requestId;
-				rslt = reprap.GetMove().EutHandleSetDriverStates(buf->msg.multipleDrivesRequestDriverState, replyRef);
+				rslt = reprap.GetMove().EutHandleSetDriverStates(buf->msg.multipleDrivesRequestDriverState, buf->dataLength, replyRef);
 				break;
 
 			case CanMessageType::m915:
@@ -562,6 +564,29 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 			case CanMessageType::m569p7:
 				requestId = buf->msg.generic.requestId;
 				rslt = reprap.GetMove().EutProcessM569Point7(buf->msg.generic, replyRef);
+				break;
+
+			case CanMessageType::setStandstillCurrentFactor:
+				requestId = buf->msg.multipleDrivesRequestFloat.requestId;
+				rslt = reprap.GetMove().EutSetStandstillCurrentFactor(buf->msg.multipleDrivesRequestFloat, buf->dataLength, replyRef);
+				break;
+
+			case CanMessageType::m970:
+				requestId = buf->msg.generic.requestId;
+# if SUPPORT_PHASE_STEPPING
+				rslt = reprap.GetMove().EutProcessM970(buf->msg.generic, replyRef);
+# else
+				rslt = GCodeResult::errorNotSupported;
+# endif
+				break;
+
+			case CanMessageType::m970p3:
+				requestId = buf->msg.generic.requestId;
+# if SUPPORT_PHASE_STEPPING
+				rslt = reprap.GetMove().EutProcessM970Point3(buf->msg.generic, replyRef);
+# else
+				rslt = GCodeResult::errorNotSupported;
+# endif
 				break;
 
 			case CanMessageType::createInputMonitorV1:
@@ -618,9 +643,14 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 				rslt = reprap.ProcessRemoteM111(buf->msg.generic, replyRef);
 				break;
 
+			case CanMessageType::setConnectionTimeout:
+				requestId = buf->msg.generic.requestId;
+				rslt = CanInterface::ProcessM959(buf->msg.generic, replyRef);
+				break;
+
 			default:
 				// We received a message type that we don't recognise. If it's a broadcast, ignore it. If it's addressed to us, send a reply.
-				if (buf->id.Src() != CanInterface::GetCanAddress())
+				if (buf->id.Dst() != CanInterface::GetCanAddress())
 				{
 					return;
 				}
@@ -657,6 +687,7 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 					msg->moreFollows = true;
 					CanInterface::SendResponseNoFree(buf);
 					++fragmentNumber;
+					msg->numWords = 0;						// data words go in fragment 0 only
 				}
 			}
 		}
@@ -668,7 +699,7 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 			{
 			case CanMessageType::inputStateChangedV1:
 				//TODO we should preferably handle this one using a separate high-priority queue or buffer
-				HandleInputStateChangedV1(buf->msg.inputChangedV1, buf->id.Src(), buf->timeStamp);
+				HandleInputStateChangedV1(buf->msg.inputChangedV1, buf->id.Src());
 				break;
 
 			case CanMessageType::inputStateChangedV2:

@@ -1105,6 +1105,8 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 
 	case GCodeState::gridProbing7:
 		// Finished probing or scanning the grid, and retracted the probe if necessary
+		// The grid moves were made in machine coordinates, so the user position needs resynchronising
+		UpdateUserPositionFromMachinePosition(gb, ms);
 		if (scanningResult != GCodeResult::ok)
 		{
 			stateMachineResult = scanningResult;
@@ -1515,10 +1517,10 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			{
 				// Setting the Z height with G30
 				ms.raw.coords[Z_AXIS] -= g30zHeightError;
-				ToolOffsetInverseTransform(ms);
 				ms.SetNewPositionOfOwnedAxes();
 				move.SetZeroHeightError(ms.raw.coords, zp.Ptr());
 			}
+			ToolOffsetInverseTransform(ms);							// the moves to the probe point and back up to the dive height didn't update the user coordinates
 			gb.AdvanceState();
 			if (zp->GetProbeType() != ZProbeType::blTouch)			// if it's a BLTouch then we have already retracted it
 			{
@@ -1729,6 +1731,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 				// A reading of zero indicates an error e.g. LDC1612 amplitude error
 				reply.copy("sensor error during calibration");
 				stateMachineResult = GCodeResult::error;
+				UpdateUserPositionFromMachinePosition(gb, ms);
 				gb.SetState(GCodeState::normal);
 			}
 			else
@@ -1738,6 +1741,8 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 				if (numCalibrationReadingsTaken == numPointsToCollect)
 				{
 					zp->SetProbing(false);
+					// Do this before the retract macro runs in case it moves axes using user coordinates
+					UpdateUserPositionFromMachinePosition(gb, ms);
 					gb.AdvanceState();
 					RetractZProbe(gb);
 				}
@@ -1973,7 +1978,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			{
 				const PrintPausedReason pauseReason = Event::GetDefaultPauseReason();
 				// In the following, if DoPause fails because it can't get the movement lock then it will not change the state, so we will return here to try again
-				(void)DoAsynchronousPause(gb, pauseReason, (pauseReason == PrintPausedReason::driverError) ? GCodeState::eventPausing2 : GCodeState::eventPausing1);
+				(void)DoAsynchronousPause(gb, pauseReason, (pauseReason == PrintPausedReason::driverError || pauseReason == PrintPausedReason::boardOverTemperature) ? GCodeState::eventPausing2 : GCodeState::eventPausing1);
 			}
 		}
 		break;

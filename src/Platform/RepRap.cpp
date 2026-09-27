@@ -567,7 +567,7 @@ void RepRap::Init() noexcept
 
 #if HAS_SBC_INTERFACE && !HAS_MASS_STORAGE
 	usingSbcInterface = true;
-	FileWriteBuffer::UsingSbcMode();
+	MassStorage::ConfigureSbcBuffering();
 #endif
 
 #if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES
@@ -597,7 +597,7 @@ void RepRap::Init() noexcept
 		else if (!MassStorage::IsCardDetected(0))		// if we failed to mount the SD card because there was no card in the slot
 		{
 			usingSbcInterface = true;
-			FileWriteBuffer::UsingSbcMode();
+			MassStorage::ConfigureSbcBuffering();
 		}
 # endif
 		else
@@ -885,7 +885,7 @@ void RepRap::GetDiagnosticsPart(unsigned int partNumber, const StringRef& reply)
 			reply.lcatf(
 				// Format string
 				"%s"											// firmware name
-				" version %s (%s%s) running on %s"				// firmware version, date, time, electronics
+				" version %s (%s) running on %s"				// firmware version, date, time, electronics
 #ifdef DUET_NG
 				"%s%s"											// optional DueX expansion board
 #endif
@@ -896,7 +896,7 @@ void RepRap::GetDiagnosticsPart(unsigned int partNumber, const StringRef& reply)
 
 				// Parameters to match format string
 				FIRMWARE_NAME,
-				VERSION, DateText, TimeSuffix, platform->GetElectronicsString()
+				VERSION, DateTimeText, platform->GetElectronicsString()
 #ifdef DUET_NG
 				, ((expansionName == nullptr) ? "" : " + ")
 				, ((expansionName == nullptr) ? "" : expansionName)
@@ -1148,6 +1148,10 @@ GCodeResult RepRap::ProcessM111(GCodeBuffer& gb, const StringRef& reply) THROWS(
 	{
 		if (module != Module::numModules)
 		{
+			if (flags != 0)
+			{
+				Platform::EnsureDebugBuffers();
+			}
 			debugMaps[module].SetFromRaw(flags);
 		}
 		else if (flags != 0)
@@ -1219,6 +1223,10 @@ GCodeResult RepRap::ProcessRemoteM111(const CanMessageGeneric& msg, const String
 	{
 		if (module < Module::numModules)
 		{
+			if (flags != 0)
+			{
+				Platform::EnsureDebugBuffers();
+			}
 			debugMaps[module].SetFromRaw(flags);
 		}
 		else if (flags != 0)
@@ -1936,7 +1944,7 @@ size_t RepRap::GetStatusIndex() const noexcept
 			  		  : 												  9		// Printing
 			  	  	)
 			: (gCodes->IsDoingToolChange())								? 10	// Changing tool
-			: (gCodes->DoingFileMacro() || !move->NoLiveMovement() ||
+			: (gCodes->DoingFileMacro() || !move->NoLiveMovement(0) ||
 			   gCodes->WaitingForAcknowledgement() ||
 			   heat->IsTuningHeater())									? 11	// Busy
 			:															  12;	// Idle
@@ -2105,7 +2113,7 @@ void RepRap::PrepareToLoadIap() noexcept
 	}
 
 	// Allow time for the firmware update message to be sent
-	// When the SBC is on USB, keep this short -- DSF is waiting for the next transfer response
+	// When the SBC is on USB, keep this short - DSF is waiting for the next transfer response
 	const uint32_t flushTime =
 #if HAS_SBC_INTERFACE && SUPPORTS_SBC_OVER_USB
 		(usingSbcInterface && sbcInterface->GetDataTransfer().GetTransportType() == SbcTransportType::usb) ? 100 :
@@ -2140,8 +2148,7 @@ void RepRap::PrepareToLoadIap() noexcept
 #endif
 	StopAnalogTask();
 #if HAS_SBC_INTERFACE && SUPPORTS_SBC_OVER_USB
-	// Don't shut down USB yet if the SBC is connected via USB --
-	// ReceiveAndStartIap() still needs it to receive the remaining IAP chunks
+	// Don't shut down USB yet if the SBC is connected via USB - ReceiveAndStartIap() still needs it to receive the remaining IAP chunks
 	if (!usingSbcInterface || sbcInterface->GetDataTransfer().GetTransportType() != SbcTransportType::usb)
 #endif
 	{

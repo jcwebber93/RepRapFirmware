@@ -111,6 +111,7 @@ extern "C" void GetMallocMutex() noexcept
 {
 	if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)		// don't take mutex if scheduler not started or suspended
 	{
+		configASSERT(__get_BASEPRI() == 0 && __get_PRIMASK() == 0);	// taking the mutex re-enables masked interrupts, so catch callers that allocate while interrupts are masked
 		mallocMutex.Take();
 	}
 }
@@ -248,7 +249,7 @@ void *Tasks::GetNVMBuffer(const uint32_t *_ecv_array _ecv_null stk) noexcept
 	// We could also trap unaligned memory access, if we change the gcc options to not generate code that uses unaligned memory access.
 	SCB->CCR |= SCB_CCR_DIV_0_TRP_Msk;
 
-#if !SAME5x
+#if SAME70 || SAM4E || SAM4S
 	// When doing a software reset, we disable the NRST input (User reset) to prevent the negative-going pulse that gets generated on it being held
 	// in the capacitor and changing the reset reason from Software to User. So enable it again here. We hope that the reset signal will have gone away by now.
 # ifndef RSTC_MR_KEY_PASSWD
@@ -296,12 +297,13 @@ extern "C" [[noreturn]] void MainTask(void *pvParameters) noexcept
 static ptrdiff_t GetHandlerFreeStack() noexcept
 {
 	const char *_ecv_array const ramend = (const char *_ecv_array)&_estack;
-	const char *_ecv_array stack_lwm = sysStackLimit;
+	const char *_ecv_array limit = reinterpret_cast<const char*>(sysStackLimit);
+	const char *_ecv_array stack_lwm = limit;
 	while (stack_lwm < ramend && *stack_lwm == memPattern)
 	{
 		++stack_lwm;
 	}
-	return stack_lwm - sysStackLimit;
+	return stack_lwm - limit;
 }
 
 ptrdiff_t Tasks::GetNeverUsedRam() noexcept

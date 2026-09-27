@@ -84,6 +84,9 @@
 #define LWIP_NETCONN            	0
 #define LWIP_SOCKET             	0
 
+/* Listeners set SOF_REUSEADDR so that re-binding a port succeeds while TIME_WAIT pcbs of earlier connections still hold it */
+#define SO_REUSE					1
+
 /*
    -----------------------------------------------
    ---------- Application layer (altcp) -----------
@@ -441,7 +444,7 @@ extern uint32_t random32(void) noexcept;
 
 #define LWIP_NOASSERT					0
 
-#define LWIP_DEBUG
+//#define LWIP_DEBUG
 #define LWIP_DBG_MIN_LEVEL              LWIP_DBG_LEVEL_ALL
 #define LWIP_DBG_TYPES_ON               LWIP_DBG_ON
 
